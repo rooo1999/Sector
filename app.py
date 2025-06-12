@@ -121,7 +121,7 @@ if uploaded_file:
         weights['mom1m'] = st.sidebar.slider("1M Mom", 0.0, 1.0, 0.2, 0.05)
         weights['mom3m'] = st.sidebar.slider("3M Mom", 0.0, 1.0, 0.2, 0.05)
         weights['mom6m'] = st.sidebar.slider("6M Mom", 0.0, 1.0, 0.2, 0.05)
-        weights['sma'] = st.sidebar.slider("SMA Pos", 0.0, 1.0, _0.1, 0.05)
+        weights['sma'] = st.sidebar.slider("SMA Pos", 0.0, 1.0, 0.1, 0.05)
         weights['rsi'] = st.sidebar.slider("RSI", 0.0, 1.0, 0.1, 0.05)
         weights['macd_hist'] = st.sidebar.slider("MACD Hist", 0.0, 1.0, 0.1, 0.05)
         weights['inv_vol'] = st.sidebar.slider("Inv Volatility", 0.0, 1.0, 0.1, 0.05)
