@@ -12,6 +12,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- GLOBAL CONSTANT ---
+INITIAL_CAPITAL = 100000
+
 #======================================================================
 # --- CORE BACKTESTING & DATA PROCESSING FUNCTIONS ---
 #======================================================================
@@ -68,15 +71,15 @@ def calculate_indicators(df, sectors, lookbacks):
 
     return indicators_df.dropna()
 
-def calculate_performance_metrics(series):
+def calculate_performance_metrics(series, initial_value):
     """Calculates all key performance metrics for a given returns series."""
     if series.empty or len(series) < 2:
         return {metric: 0 for metric in ["Total Return", "CAGR", "Annualized Volatility", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}
 
-    total_return = (series.iloc[-1] / series.iloc[0]) - 1
+    total_return = (series.iloc[-1] / initial_value) - 1
     
     days = (series.index[-1] - series.index[0]).days
-    cagr = ((series.iloc[-1] / series.iloc[0]) ** (365.25 / days)) - 1 if days > 0 else 0
+    cagr = ((series.iloc[-1] / initial_value) ** (365.25 / days)) - 1 if days > 0 else 0
     
     daily_returns = series.pct_change().dropna()
     if daily_returns.empty:
@@ -101,8 +104,7 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
     rebalancing_dates = rebalancing_dates[rebalancing_dates >= indicators_df.index[0]]
 
     trades, portfolio_values = [], []
-    initial_capital = 100000
-    current_cash = initial_capital
+    current_cash = INITIAL_CAPITAL
     latest_scores = pd.Series(dtype=float)
     
     previous_month_sectors, total_churned_positions = set(), 0
@@ -138,11 +140,12 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
 
     portfolio_df = pd.DataFrame(portfolio_values).set_index('Date')
     daily_portfolio = portfolio_df['Portfolio_Value'].resample('D').last().ffill()
-    strategy_metrics = calculate_performance_metrics(daily_portfolio)
+    strategy_metrics = calculate_performance_metrics(daily_portfolio, INITIAL_CAPITAL)
     
     benchmark_data = price_df[benchmark_col]
     benchmark_series = benchmark_data.reindex(daily_portfolio.index, method='ffill').dropna()
-    benchmark_metrics = calculate_performance_metrics(benchmark_series)
+    benchmark_metrics = calculate_performance_metrics(benchmark_series, benchmark_series.iloc[0])
+    
     churn_ratio = total_churned_positions / (len(trades) * top_n) if (len(trades) * top_n) > 0 else 0
 
     return {
@@ -215,22 +218,15 @@ if uploaded_file:
                     }
                     perf_df = pd.DataFrame(perf_data).set_index('Metric')
                     
-                    # --- THIS IS THE CORRECTED FORMATTING BLOCK ---
                     format_mapping = {
-                        "Total Return": "{:,.2%}",
-                        "CAGR": "{:,.2%}",
-                        "Annualized Volatility": "{:,.2%}",
-                        "Max Drawdown": "{:,.2%}",
-                        "Churn Ratio": "{:,.2%}",
-                        "Sharpe Ratio": "{:.2f}",
-                        "Calmar Ratio": "{:.2f}"
+                        "Total Return": "{:,.2%}", "CAGR": "{:,.2%}", "Annualized Volatility": "{:,.2%}",
+                        "Max Drawdown": "{:,.2%}", "Churn Ratio": "{:,.2%}", "Sharpe Ratio": "{:.2f}", "Calmar Ratio": "{:.2f}"
                     }
                     st.dataframe(perf_df.style.format(formatter=format_mapping))
-                    # --- END CORRECTED FORMATTING BLOCK ---
 
                     st.subheader("📈 Equity Curve & Drawdowns")
                     portfolio_series = results['portfolio_df']['Portfolio_Value'].resample('D').last().ffill()
-                    benchmark_series_norm = (results['benchmark_series'] / results['benchmark_series'].iloc[0]) * initial_capital if not results['benchmark_series'].empty else pd.Series()
+                    benchmark_series_norm = (results['benchmark_series'] / results['benchmark_series'].iloc[0]) * INITIAL_CAPITAL if not results['benchmark_series'].empty else pd.Series()
                     
                     if not portfolio_series.empty:
                         strat_dd = (portfolio_series - portfolio_series.cummax()) / portfolio_series.cummax()
