@@ -136,7 +136,6 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
         latest_scores = sector_scores 
         top_sectors = set(sector_scores.nlargest(top_n).index)
         
-        # Churn Calculation
         churned_count = len(previous_month_sectors - top_sectors)
         total_churned_positions += churned_count
         previous_month_sectors = top_sectors
@@ -151,21 +150,21 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
     if not portfolio_values: return None
 
     portfolio_df = pd.DataFrame(portfolio_values).set_index('Date')
-    
-    # Create daily series for accurate metric calculation
     daily_portfolio = portfolio_df['Portfolio_Value'].resample('D').last().ffill()
-    
     strategy_metrics = calculate_performance_metrics(daily_portfolio)
     
-    # Benchmark Metrics
-    benchmark_series = price_df[benchmark_col].loc[daily_portfolio.index]
-    benchmark_metrics = calculate_performance_metrics(benchmark_series)
+    # --- MODIFIED BLOCK HERE ---
+    # Benchmark Metrics - Robustly align the benchmark to the daily portfolio index
+    benchmark_data = price_df[benchmark_col]
+    benchmark_series = benchmark_data.reindex(daily_portfolio.index, method='ffill')
+    # --- END MODIFIED BLOCK ---
     
+    benchmark_metrics = calculate_performance_metrics(benchmark_series)
     churn_ratio = total_churned_positions / (len(trades) * top_n) if (len(trades) * top_n) > 0 else 0
 
     return {
         "portfolio_df": portfolio_df,
-        "benchmark_series": benchmark_series,
+        "benchmark_series": benchmark_series, # Use the aligned series
         "trades_df": pd.DataFrame(trades),
         "monthly_returns": portfolio_df['Portfolio_Value'].pct_change(),
         "strategy_metrics": strategy_metrics,
@@ -187,19 +186,16 @@ if uploaded_file:
     df_full = load_data(uploaded_file)
     if df_full is not None and not df_full.empty:
         
-        # --- Editable Dates ---
         start_date = st.sidebar.date_input("Start Date", df_full.index.min(), min_value=df_full.index.min(), max_value=df_full.index.max())
         end_date = st.sidebar.date_input("End Date", df_full.index.max(), min_value=df_full.index.min(), max_value=df_full.index.max())
         df = df_full.loc[start_date:end_date]
         
-        # --- Sector & Benchmark Selection ---
         all_columns = df.columns.tolist()
         benchmark_col = st.sidebar.selectbox("Select Benchmark", options=all_columns, index=len(all_columns)-1)
         available_sectors = [col for col in all_columns if col != benchmark_col]
         sectors_to_run = st.sidebar.multiselect("Select Sectors", options=available_sectors, default=available_sectors)
         top_n = st.sidebar.slider("Number of Top Sectors to Invest In (N)", 1, len(sectors_to_run) if sectors_to_run else 1, min(2, len(sectors_to_run)) if sectors_to_run else 1)
 
-        # --- Indicator Weights ---
         st.sidebar.subheader("⚖️ Indicator Weights")
         weights = {}
         c1, c2 = st.sidebar.columns(2)
@@ -213,7 +209,6 @@ if uploaded_file:
         total_weight = sum(weights.values())
         if total_weight > 0: weights = {k: v / total_weight for k, v in weights.items()}
         
-        # --- Editable Lookbacks ---
         with st.sidebar.expander("🔧 Advanced: Edit Lookback Periods"):
             lookbacks = {}
             lookbacks['mom1'] = st.number_input("1M Momentum Days", 1, 252, 21)
@@ -223,7 +218,6 @@ if uploaded_file:
             lookbacks['rsi'] = st.number_input("RSI Length", 1, 200, 14)
             lookbacks['volatility'] = st.number_input("Volatility Window", 1, 200, 21)
 
-        # --- Run Button ---
         if st.sidebar.button("🚀 Run Backtest"):
             if not sectors_to_run:
                 st.warning("Please select at least one sector.")
@@ -235,7 +229,6 @@ if uploaded_file:
                 if results:
                     st.success("✅ Backtest Complete!")
                     
-                    # --- Performance Metrics Display ---
                     st.subheader("📊 Key Performance Indicators")
                     perf_data = {
                         'Metric': list(results['strategy_metrics'].keys()) + ["Churn Ratio"],
@@ -244,21 +237,16 @@ if uploaded_file:
                     }
                     perf_df = pd.DataFrame(perf_data).set_index('Metric')
                     
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        st.dataframe(perf_df.style.format({
-                            'Strategy': '{:,.2%}'.format,
-                            'Benchmark': '{:,.2%}'.format
-                        }).format(subset=['Sharpe Ratio', 'Calmar Ratio'], formatter='{:.2f}'))
-                    
-                    col2.metric("Churn Ratio (Annualized)", f"{results['churn_ratio'] * 12:.2%}", help="The percentage of the portfolio that is replaced each month, annualized. Lower is better.")
+                    st.dataframe(perf_df.style.format({
+                        'Strategy': '{:,.2%}'.format,
+                        'Benchmark': '{:,.2%}'.format
+                    }, subset=pd.IndexSlice[['Total Return', 'CAGR', 'Annualized Volatility', 'Max Drawdown', 'Churn Ratio']])
+                    .format(subset=pd.IndexSlice[['Sharpe Ratio', 'Calmar Ratio']], formatter='{:.2f}'))
 
-                    # --- Equity Curve & Drawdown Chart ---
                     st.subheader("📈 Equity Curve & Drawdowns")
                     portfolio_series = results['portfolio_df']['Portfolio_Value'].resample('D').last().ffill()
-                    benchmark_series_norm = (results['benchmark_series'] / results['benchmark_series'].iloc[0]) * 100000
+                    benchmark_series_norm = (results['benchmark_series'] / results['benchmark_series'].iloc[0]) * initial_capital
                     
-                    # Create Drawdown series
                     strat_dd = (portfolio_series - portfolio_series.cummax()) / portfolio_series.cummax()
                     bench_dd = (benchmark_series_norm - benchmark_series_norm.cummax()) / benchmark_series_norm.cummax()
 
@@ -274,7 +262,6 @@ if uploaded_file:
                     fig.update_yaxes(title_text="Drawdown", tickformat=".0%", row=2, col=1)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # --- Detailed Breakdowns in Expanders ---
                     with st.expander("🥇 View Latest Sector Scores"):
                         st.dataframe(results['latest_scores'].to_frame(name='Final Score').style.format("{:.4f}"))
 
