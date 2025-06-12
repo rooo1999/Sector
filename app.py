@@ -54,7 +54,7 @@ def calculate_indicators(df, sectors, lookbacks):
         indicators_df[f'{sector}_rsi'] = ta.rsi(sector_series, length=lookbacks['rsi'])
         macd = ta.macd(sector_series, fast=12, slow=26, signal=9)
 
-        indicators_df[f'{sector}_sma_norm'] = (sector_series - sma_val) / sma_val
+        indicators_df[f'{sector}_sma_norm'] = (sector_series - sma_val) / sma_val if sma_val is not None else 0
         
         if macd is not None and not macd.empty:
             indicators_df[f'{sector}_macd_hist'] = macd['MACDh_12_26_9']
@@ -70,30 +70,29 @@ def calculate_indicators(df, sectors, lookbacks):
 
 def calculate_performance_metrics(series):
     """Calculates all key performance metrics for a given returns series."""
+    if series.empty or len(series) < 2:
+        return {metric: 0 for metric in ["Total Return", "CAGR", "Annualized Volatility", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}
+
     total_return = (series.iloc[-1] / series.iloc[0]) - 1
     
     days = (series.index[-1] - series.index[0]).days
     cagr = ((series.iloc[-1] / series.iloc[0]) ** (365.25 / days)) - 1 if days > 0 else 0
     
     daily_returns = series.pct_change().dropna()
-    
+    if daily_returns.empty:
+        return { "Total Return": total_return, "CAGR": cagr, "Annualized Volatility": 0, "Sharpe Ratio": 0, "Max Drawdown": 0, "Calmar Ratio": 0}
+
     volatility = daily_returns.std() * np.sqrt(252)
-    sharpe_ratio = (daily_returns.mean() * 252) / (daily_returns.std() * np.sqrt(252)) if daily_returns.std() != 0 else 0
+    sharpe_ratio = (daily_returns.mean() * 252) / volatility if volatility != 0 else 0
     
-    # Max Drawdown
     running_max = series.cummax()
     drawdown = (series - running_max) / running_max
     max_drawdown = drawdown.min()
-    
     calmar_ratio = cagr / abs(max_drawdown) if max_drawdown != 0 else 0
     
     return {
-        "Total Return": total_return,
-        "CAGR": cagr,
-        "Annualized Volatility": volatility,
-        "Sharpe Ratio": sharpe_ratio,
-        "Max Drawdown": max_drawdown,
-        "Calmar Ratio": calmar_ratio
+        "Total Return": total_return, "CAGR": cagr, "Annualized Volatility": volatility,
+        "Sharpe Ratio": sharpe_ratio, "Max Drawdown": max_drawdown, "Calmar Ratio": calmar_ratio
     }
 
 def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n=2):
@@ -106,8 +105,7 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
     current_cash = initial_capital
     latest_scores = pd.Series(dtype=float)
     
-    previous_month_sectors = set()
-    total_churned_positions = 0
+    previous_month_sectors, total_churned_positions = set(), 0
     
     for i in range(len(rebalancing_dates) - 1):
         start_date, end_date = rebalancing_dates[i], rebalancing_dates[i+1]
@@ -121,23 +119,12 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
         signal_date = price_df.index[signal_date_loc - 1]
         if signal_date not in indicators_df.index: continue
 
-        sector_scores = pd.Series({
-            sector: (
-                indicators_df.loc[signal_date].get(f'{sector}_mom1m', 0) * weights['mom1m'] +
-                indicators_df.loc[signal_date].get(f'{sector}_mom3m', 0) * weights['mom3m'] +
-                indicators_df.loc[signal_date].get(f'{sector}_mom6m', 0) * weights['mom6m'] +
-                indicators_df.loc[signal_date].get(f'{sector}_sma_norm', 0) * weights['sma'] +
-                indicators_df.loc[signal_date].get(f'{sector}_rsi', 0) * weights['rsi'] +
-                indicators_df.loc[signal_date].get(f'{sector}_macd_hist', 0) * weights['macd_hist'] +
-                indicators_df.loc[signal_date].get(f'{sector}_inv_vol', 0) * weights['inv_vol']
-            ) for sector in sectors
-        })
+        sector_scores = pd.Series({ s: ( indicators_df.loc[signal_date].get(f'{s}_mom1m', 0) * weights['mom1m'] + indicators_df.loc[signal_date].get(f'{s}_mom3m', 0) * weights['mom3m'] + indicators_df.loc[signal_date].get(f'{s}_mom6m', 0) * weights['mom6m'] + indicators_df.loc[signal_date].get(f'{s}_sma_norm', 0) * weights['sma'] + indicators_df.loc[signal_date].get(f'{s}_rsi', 0) * weights['rsi'] + indicators_df.loc[signal_date].get(f'{s}_macd_hist', 0) * weights['macd_hist'] + indicators_df.loc[signal_date].get(f'{s}_inv_vol', 0) * weights['inv_vol'] ) for s in sectors })
         
         latest_scores = sector_scores 
         top_sectors = set(sector_scores.nlargest(top_n).index)
         
-        churned_count = len(previous_month_sectors - top_sectors)
-        total_churned_positions += churned_count
+        total_churned_positions += len(previous_month_sectors - top_sectors)
         previous_month_sectors = top_sectors
 
         monthly_return = sum((price_df.loc[exit_price_date, s] - price_df.loc[entry_price_date, s]) / price_df.loc[entry_price_date, s] for s in top_sectors)
@@ -153,23 +140,18 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
     daily_portfolio = portfolio_df['Portfolio_Value'].resample('D').last().ffill()
     strategy_metrics = calculate_performance_metrics(daily_portfolio)
     
-    # --- MODIFIED BLOCK HERE ---
-    # Benchmark Metrics - Robustly align the benchmark to the daily portfolio index
+    # --- THIS IS THE CORRECTED BLOCK ---
     benchmark_data = price_df[benchmark_col]
-    benchmark_series = benchmark_data.reindex(daily_portfolio.index, method='ffill')
-    # --- END MODIFIED BLOCK ---
+    benchmark_series = benchmark_data.reindex(daily_portfolio.index, method='ffill').dropna()
+    # --- END CORRECTED BLOCK ---
     
     benchmark_metrics = calculate_performance_metrics(benchmark_series)
     churn_ratio = total_churned_positions / (len(trades) * top_n) if (len(trades) * top_n) > 0 else 0
 
     return {
-        "portfolio_df": portfolio_df,
-        "benchmark_series": benchmark_series, # Use the aligned series
-        "trades_df": pd.DataFrame(trades),
-        "monthly_returns": portfolio_df['Portfolio_Value'].pct_change(),
-        "strategy_metrics": strategy_metrics,
-        "benchmark_metrics": benchmark_metrics,
-        "latest_scores": latest_scores.sort_values(ascending=False),
+        "portfolio_df": portfolio_df, "benchmark_series": benchmark_series, "trades_df": pd.DataFrame(trades),
+        "monthly_returns": portfolio_df['Portfolio_Value'].pct_change(), "strategy_metrics": strategy_metrics,
+        "benchmark_metrics": benchmark_metrics, "latest_scores": latest_scores.sort_values(ascending=False),
         "churn_ratio": churn_ratio
     }
 
@@ -178,7 +160,6 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
 #======================================================================
 
 st.title("📈 Advanced Momentum Sector Rotation Strategy")
-
 st.sidebar.header("⚙️ Strategy Parameters")
 uploaded_file = st.sidebar.file_uploader("Upload your Excel data file", type=["xlsx"])
 
@@ -194,7 +175,7 @@ if uploaded_file:
         benchmark_col = st.sidebar.selectbox("Select Benchmark", options=all_columns, index=len(all_columns)-1)
         available_sectors = [col for col in all_columns if col != benchmark_col]
         sectors_to_run = st.sidebar.multiselect("Select Sectors", options=available_sectors, default=available_sectors)
-        top_n = st.sidebar.slider("Number of Top Sectors to Invest In (N)", 1, len(sectors_to_run) if sectors_to_run else 1, min(2, len(sectors_to_run)) if sectors_to_run else 1)
+        top_n = st.sidebar.slider("Sectors to Invest In (N)", 1, len(sectors_to_run) if sectors_to_run else 1, min(2, len(sectors_to_run)) if sectors_to_run else 1)
 
         st.sidebar.subheader("⚖️ Indicator Weights")
         weights = {}
@@ -222,7 +203,7 @@ if uploaded_file:
             if not sectors_to_run:
                 st.warning("Please select at least one sector.")
             else:
-                with st.spinner("Calculating... This might take a moment."):
+                with st.spinner("Calculating..."):
                     indicators_df = calculate_indicators(df, sectors_to_run, lookbacks)
                     results = run_backtest(df, indicators_df, sectors_to_run, benchmark_col, weights, top_n)
                 
