@@ -54,7 +54,7 @@ def calculate_indicators(df, sectors, lookbacks):
         indicators_df[f'{sector}_rsi'] = ta.rsi(sector_series, length=lookbacks['rsi'])
         macd = ta.macd(sector_series, fast=12, slow=26, signal=9)
 
-        indicators_df[f'{sector}_sma_norm'] = (sector_series - sma_val) / sma_val if sma_val is not None else 0
+        indicators_df[f'{sector}_sma_norm'] = (sector_series - sma_val) / sma_val if sma_val is not None and not sma_val.empty else 0
         
         if macd is not None and not macd.empty:
             indicators_df[f'{sector}_macd_hist'] = macd['MACDh_12_26_9']
@@ -140,11 +140,8 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
     daily_portfolio = portfolio_df['Portfolio_Value'].resample('D').last().ffill()
     strategy_metrics = calculate_performance_metrics(daily_portfolio)
     
-    # --- THIS IS THE CORRECTED BLOCK ---
     benchmark_data = price_df[benchmark_col]
     benchmark_series = benchmark_data.reindex(daily_portfolio.index, method='ffill').dropna()
-    # --- END CORRECTED BLOCK ---
-    
     benchmark_metrics = calculate_performance_metrics(benchmark_series)
     churn_ratio = total_churned_positions / (len(trades) * top_n) if (len(trades) * top_n) > 0 else 0
 
@@ -218,30 +215,40 @@ if uploaded_file:
                     }
                     perf_df = pd.DataFrame(perf_data).set_index('Metric')
                     
-                    st.dataframe(perf_df.style.format({
-                        'Strategy': '{:,.2%}'.format,
-                        'Benchmark': '{:,.2%}'.format
-                    }, subset=pd.IndexSlice[['Total Return', 'CAGR', 'Annualized Volatility', 'Max Drawdown', 'Churn Ratio']])
-                    .format(subset=pd.IndexSlice[['Sharpe Ratio', 'Calmar Ratio']], formatter='{:.2f}'))
+                    # --- THIS IS THE CORRECTED FORMATTING BLOCK ---
+                    format_mapping = {
+                        "Total Return": "{:,.2%}",
+                        "CAGR": "{:,.2%}",
+                        "Annualized Volatility": "{:,.2%}",
+                        "Max Drawdown": "{:,.2%}",
+                        "Churn Ratio": "{:,.2%}",
+                        "Sharpe Ratio": "{:.2f}",
+                        "Calmar Ratio": "{:.2f}"
+                    }
+                    st.dataframe(perf_df.style.format(formatter=format_mapping))
+                    # --- END CORRECTED FORMATTING BLOCK ---
 
                     st.subheader("📈 Equity Curve & Drawdowns")
                     portfolio_series = results['portfolio_df']['Portfolio_Value'].resample('D').last().ffill()
-                    benchmark_series_norm = (results['benchmark_series'] / results['benchmark_series'].iloc[0]) * initial_capital
+                    benchmark_series_norm = (results['benchmark_series'] / results['benchmark_series'].iloc[0]) * initial_capital if not results['benchmark_series'].empty else pd.Series()
                     
-                    strat_dd = (portfolio_series - portfolio_series.cummax()) / portfolio_series.cummax()
-                    bench_dd = (benchmark_series_norm - benchmark_series_norm.cummax()) / benchmark_series_norm.cummax()
+                    if not portfolio_series.empty:
+                        strat_dd = (portfolio_series - portfolio_series.cummax()) / portfolio_series.cummax()
+                        bench_dd = (benchmark_series_norm - benchmark_series_norm.cummax()) / benchmark_series_norm.cummax() if not benchmark_series_norm.empty else pd.Series()
 
-                    from plotly.subplots import make_subplots
-                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-                    fig.add_trace(go.Scatter(x=portfolio_series.index, y=portfolio_series, name='Strategy', line=dict(color='royalblue')), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=benchmark_series_norm.index, y=benchmark_series_norm, name='Benchmark', line=dict(color='grey', dash='dash')), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=strat_dd.index, y=strat_dd, name='Strategy Drawdown', fill='tozeroy', line=dict(color='rgba(65, 105, 225, 0.5)')), row=2, col=1)
-                    fig.add_trace(go.Scatter(x=bench_dd.index, y=bench_dd, name='Benchmark Drawdown', fill='tozeroy', line=dict(color='rgba(128, 128, 128, 0.5)')), row=2, col=1)
-                    
-                    fig.update_layout(height=600, title_text="Performance and Underwater Equity Curve", legend_tracegroupgap=180)
-                    fig.update_yaxes(title_text="Portfolio Value", row=1, col=1)
-                    fig.update_yaxes(title_text="Drawdown", tickformat=".0%", row=2, col=1)
-                    st.plotly_chart(fig, use_container_width=True)
+                        from plotly.subplots import make_subplots
+                        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+                        fig.add_trace(go.Scatter(x=portfolio_series.index, y=portfolio_series, name='Strategy', line=dict(color='royalblue')), row=1, col=1)
+                        if not benchmark_series_norm.empty:
+                            fig.add_trace(go.Scatter(x=benchmark_series_norm.index, y=benchmark_series_norm, name='Benchmark', line=dict(color='grey', dash='dash')), row=1, col=1)
+                        fig.add_trace(go.Scatter(x=strat_dd.index, y=strat_dd, name='Strategy Drawdown', fill='tozeroy', line=dict(color='rgba(65, 105, 225, 0.5)')), row=2, col=1)
+                        if not bench_dd.empty:
+                            fig.add_trace(go.Scatter(x=bench_dd.index, y=bench_dd, name='Benchmark Drawdown', fill='tozeroy', line=dict(color='rgba(128, 128, 128, 0.5)')), row=2, col=1)
+                        
+                        fig.update_layout(height=600, title_text="Performance and Underwater Equity Curve", legend_tracegroupgap=180)
+                        fig.update_yaxes(title_text="Portfolio Value", row=1, col=1)
+                        fig.update_yaxes(title_text="Drawdown", tickformat=".0%", row=2, col=1)
+                        st.plotly_chart(fig, use_container_width=True)
                     
                     with st.expander("🥇 View Latest Sector Scores"):
                         st.dataframe(results['latest_scores'].to_frame(name='Final Score').style.format("{:.4f}"))
