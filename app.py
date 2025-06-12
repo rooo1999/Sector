@@ -38,7 +38,7 @@ def load_data(uploaded_file):
         return None, f"Error loading data: {e}"
 
 @st.cache_data
-def calculate_indicators(_df, assets_to_calculate, lookbacks):
+def calculate_indicators(_df, assets_to_calculate, benchmark_col, lookbacks):
     """Calculates indicators for all specified assets (sectors + benchmark)."""
     indicators_df = pd.DataFrame(index=_df.index)
     for asset in assets_to_calculate:
@@ -58,7 +58,12 @@ def calculate_indicators(_df, assets_to_calculate, lookbacks):
         volatility = daily_returns.rolling(window=lookbacks['volatility']).std()
         indicators_df[f'{asset}_inv_vol'] = 1 / volatility
         indicators_df[f'{asset}_inv_vol'].replace([np.inf, -np.inf], 0, inplace=True)
-    indicators_df[f'{assets_to_calculate[-1]}_sma_long'] = _df[assets_to_calculate[-1]].rolling(window=TREND_FILTER_LOOKBACK).mean()
+    
+    # --- THIS IS THE CORRECTED LINE ---
+    # Explicitly calculate the long-term SMA for the benchmark asset
+    indicators_df[f'{benchmark_col}_sma_long'] = _df[benchmark_col].rolling(window=TREND_FILTER_LOOKBACK).mean()
+    # --- END CORRECTION ---
+
     return indicators_df.dropna()
 
 def calculate_performance_metrics(series, initial_value):
@@ -128,7 +133,7 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
             historic_vol = equal_weight_returns.tail(63).std() * np.sqrt(252)
             if historic_vol > 0:
                 leverage = target_vol / historic_vol
-                leverage = min(leverage, 1.5) # Cap leverage at 150%
+                leverage = min(leverage, 1.5)
 
         monthly_return = sum((price_df.loc[exit_price_date, s] - price_df.loc[entry_price_date, s]) / price_df.loc[entry_price_date, s] for s in top_sectors)
         avg_monthly_return = (monthly_return / top_n if top_n > 0 else 0) * leverage
@@ -156,14 +161,13 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
 #======================================================================
 
 st.title("🏆 Professional Momentum Strategy Lab")
-st.sidebar.image("https://i.imgur.com/2LCa2W0.png", use_column_width=True) # A nice professional header image
+st.sidebar.image("https://i.imgur.com/2LCa2W0.png", use_column_width=True)
 st.sidebar.header("⚙️ Strategy Configuration")
 uploaded_file = st.sidebar.file_uploader("Upload Your Excel Data", type=["xlsx"])
 
 if uploaded_file:
     df_full, error_msg = load_data(uploaded_file)
-    if error_msg:
-        st.error(error_msg)
+    if error_msg: st.error(error_msg)
     elif df_full is not None and not df_full.empty:
         st.sidebar.subheader("📅 Backtest Period")
         start_date = st.sidebar.date_input("Start Date", df_full.index.min(), min_value=df_full.index.min(), max_value=df_full.index.max())
@@ -195,7 +199,7 @@ if uploaded_file:
         weights_pct['rsi'] = c1.slider("RSI", 0, 100, 10, 5)
         weights_pct['macd_hist'] = c2.slider("MACD Hist", 0, 100, 10, 5)
         weights_pct['inv_vol'] = st.sidebar.slider("Inverse Volatility", 0, 100, 10, 5, help="Higher weight prefers less volatile sectors.")
-
+        
         raw_total = sum(weights_pct.values())
         st.sidebar.metric("Weights Total", f"{raw_total} / 100")
         weights = {k: v / raw_total if raw_total > 0 else 0 for k, v in weights_pct.items()}
@@ -218,7 +222,7 @@ if uploaded_file:
 
                 with st.spinner("Calculating... This may take a moment."):
                     assets_to_calc = sectors_to_run + [benchmark_col] + ([risk_off_asset] if risk_off_asset != 'Cash (0% Return)' else [])
-                    indicators_df = calculate_indicators(df, list(set(assets_to_calc)), lookbacks)
+                    indicators_df = calculate_indicators(df, list(set(assets_to_calc)), benchmark_col, lookbacks)
                     results = run_backtest(df, indicators_df, sectors_to_run, benchmark_col, weights, top_n, use_trend_filter, risk_off_asset, use_vol_targeting, target_vol)
                 
                 if results:
