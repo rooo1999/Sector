@@ -7,13 +7,14 @@ import openpyxl
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Advanced Momentum Sector Strategy",
+    page_title="Professional Momentum Strategy Lab",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- GLOBAL CONSTANT ---
+# --- GLOBAL CONSTANTS ---
 INITIAL_CAPITAL = 100000
+TREND_FILTER_LOOKBACK = 200 # 200-day SMA for market trend
 
 #======================================================================
 # --- CORE BACKTESTING & DATA PROCESSING FUNCTIONS ---
@@ -27,14 +28,11 @@ def load_data(uploaded_file):
         if date_col is None:
             st.error("Error: 'Date' column not found.")
             return None
-            
         df[date_col] = pd.to_datetime(df[date_col])
         df = df.set_index(date_col)
-        
         for col in df.columns:
             if col.lower() != 'date':
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-
         df = df.dropna()
         df = pd.DataFrame(df.values, index=df.index, columns=df.columns) # "Laundering" fix
         return df
@@ -42,33 +40,34 @@ def load_data(uploaded_file):
         st.error(f"Error loading data: {e}")
         return None
 
-def calculate_indicators(df, sectors, lookbacks):
-    """Calculates indicators using DIRECT FUNCTION CALLS and editable lookbacks."""
+def calculate_indicators(df, assets_to_calculate, lookbacks):
+    """Calculates indicators for all specified assets (sectors + benchmark)."""
     indicators_df = pd.DataFrame(index=df.index)
     
-    for sector in sectors:
-        sector_series = df[sector]
+    for asset in assets_to_calculate:
+        asset_series = df[asset]
+        indicators_df[f'{asset}_mom1m'] = asset_series.pct_change(periods=lookbacks['mom1'])
+        indicators_df[f'{asset}_mom3m'] = asset_series.pct_change(periods=lookbacks['mom3'])
+        indicators_df[f'{asset}_mom6m'] = asset_series.pct_change(periods=lookbacks['mom6'])
         
-        indicators_df[f'{sector}_mom1m'] = sector_series.pct_change(periods=lookbacks['mom1'])
-        indicators_df[f'{sector}_mom3m'] = sector_series.pct_change(periods=lookbacks['mom3'])
-        indicators_df[f'{sector}_mom6m'] = sector_series.pct_change(periods=lookbacks['mom6'])
-        
-        sma_val = ta.sma(sector_series, length=lookbacks['sma'])
-        indicators_df[f'{sector}_rsi'] = ta.rsi(sector_series, length=lookbacks['rsi'])
-        macd = ta.macd(sector_series, fast=12, slow=26, signal=9)
+        sma_val = ta.sma(asset_series, length=lookbacks['sma'])
+        indicators_df[f'{asset}_rsi'] = ta.rsi(asset_series, length=lookbacks['rsi'])
+        macd = ta.macd(asset_series, fast=12, slow=26, signal=9)
 
-        indicators_df[f'{sector}_sma_norm'] = (sector_series - sma_val) / sma_val if sma_val is not None and not sma_val.empty else 0
+        indicators_df[f'{asset}_sma_norm'] = (asset_series - sma_val) / sma_val if sma_val is not None and not sma_val.empty else 0
         
         if macd is not None and not macd.empty:
-            indicators_df[f'{sector}_macd_hist'] = macd['MACDh_12_26_9']
+            indicators_df[f'{asset}_macd_hist'] = macd['MACDh_12_26_9']
         else:
-            indicators_df[f'{sector}_macd_hist'] = 0
+            indicators_df[f'{asset}_macd_hist'] = 0
             
-        daily_returns = sector_series.pct_change()
+        daily_returns = asset_series.pct_change()
         volatility = daily_returns.rolling(window=lookbacks['volatility']).std()
-        indicators_df[f'{sector}_inv_vol'] = 1 / volatility
-        indicators_df[f'{sector}_inv_vol'].replace([np.inf, -np.inf], 0, inplace=True)
+        indicators_df[f'{asset}_inv_vol'] = 1 / volatility
+        indicators_df[f'{asset}_inv_vol'].replace([np.inf, -np.inf], 0, inplace=True)
 
+    # Add the long-term SMA for the trend filter
+    indicators_df[f'{assets_to_calculate[-1]}_sma_long'] = df[assets_to_calculate[-1]].rolling(window=TREND_FILTER_LOOKBACK).mean()
     return indicators_df.dropna()
 
 def calculate_performance_metrics(series, initial_value):
@@ -77,17 +76,15 @@ def calculate_performance_metrics(series, initial_value):
         return {metric: 0 for metric in ["Total Return", "CAGR", "Annualized Volatility", "Sharpe Ratio", "Max Drawdown", "Calmar Ratio"]}
 
     total_return = (series.iloc[-1] / initial_value) - 1
-    
     days = (series.index[-1] - series.index[0]).days
     cagr = ((series.iloc[-1] / initial_value) ** (365.25 / days)) - 1 if days > 0 else 0
-    
     daily_returns = series.pct_change().dropna()
+
     if daily_returns.empty:
         return { "Total Return": total_return, "CAGR": cagr, "Annualized Volatility": 0, "Sharpe Ratio": 0, "Max Drawdown": 0, "Calmar Ratio": 0}
 
     volatility = daily_returns.std() * np.sqrt(252)
     sharpe_ratio = (daily_returns.mean() * 252) / volatility if volatility != 0 else 0
-    
     running_max = series.cummax()
     drawdown = (series - running_max) / running_max
     max_drawdown = drawdown.min()
@@ -98,8 +95,8 @@ def calculate_performance_metrics(series, initial_value):
         "Sharpe Ratio": sharpe_ratio, "Max Drawdown": max_drawdown, "Calmar Ratio": calmar_ratio
     }
 
-def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n=2):
-    """Runs the full backtest and calculates all performance metrics."""
+def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n, use_trend_filter, ranking_method):
+    """Runs the full backtest with new strategy options."""
     rebalancing_dates = price_df.groupby([price_df.index.year, price_df.index.month]).head(1).index
     rebalancing_dates = rebalancing_dates[rebalancing_dates >= indicators_df.index[0]]
 
@@ -121,8 +118,34 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
         signal_date = price_df.index[signal_date_loc - 1]
         if signal_date not in indicators_df.index: continue
 
-        sector_scores = pd.Series({ s: ( indicators_df.loc[signal_date].get(f'{s}_mom1m', 0) * weights['mom1m'] + indicators_df.loc[signal_date].get(f'{s}_mom3m', 0) * weights['mom3m'] + indicators_df.loc[signal_date].get(f'{s}_mom6m', 0) * weights['mom6m'] + indicators_df.loc[signal_date].get(f'{s}_sma_norm', 0) * weights['sma'] + indicators_df.loc[signal_date].get(f'{s}_rsi', 0) * weights['rsi'] + indicators_df.loc[signal_date].get(f'{s}_macd_hist', 0) * weights['macd_hist'] + indicators_df.loc[signal_date].get(f'{s}_inv_vol', 0) * weights['inv_vol'] ) for s in sectors })
+        # --- Trend Filter Logic ---
+        is_market_uptrend = price_df.loc[signal_date, benchmark_col] > indicators_df.loc[signal_date, f'{benchmark_col}_sma_long']
+        if use_trend_filter and not is_market_uptrend:
+            trades.append({'Start Date': start_date.date(), 'End Date': exit_price_date.date(), 'Sectors Selected': 'Cash (Market Downtrend)'})
+            portfolio_values.append({'Date': exit_price_date, 'Portfolio_Value': current_cash}) # Value doesn't change
+            previous_month_sectors = set() # Reset holdings
+            continue
+
+        # --- Ranking Logic ---
+        asset_scores = {}
+        assets_to_score = sectors + ([benchmark_col] if ranking_method == 'Relative Strength vs. Benchmark' else [])
+        for asset in assets_to_score:
+            asset_scores[asset] = (
+                indicators_df.loc[signal_date, f'{asset}_mom1m'] * weights['mom1m'] +
+                indicators_df.loc[signal_date, f'{asset}_mom3m'] * weights['mom3m'] +
+                indicators_df.loc[signal_date, f'{asset}_mom6m'] * weights['mom6m'] +
+                indicators_df.loc[signal_date, f'{asset}_sma_norm'] * weights['sma'] +
+                indicators_df.loc[signal_date, f'{asset}_rsi'] * weights['rsi'] +
+                indicators_df.loc[signal_date, f'{asset}_macd_hist'] * weights['macd_hist'] +
+                indicators_df.loc[signal_date, f'{asset}_inv_vol'] * weights['inv_vol']
+            )
+
+        sector_scores = pd.Series({s: asset_scores[s] for s in sectors})
         
+        if ranking_method == 'Relative Strength vs. Benchmark':
+            benchmark_score = asset_scores[benchmark_col]
+            sector_scores = sector_scores - benchmark_score # Calculate relative scores
+
         latest_scores = sector_scores 
         top_sectors = set(sector_scores.nlargest(top_n).index)
         
@@ -159,7 +182,7 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
 # --- STREAMLIT UI APPLICATION ---
 #======================================================================
 
-st.title("📈 Advanced Momentum Sector Rotation Strategy")
+st.title("🏆 Professional Momentum Strategy Lab")
 st.sidebar.header("⚙️ Strategy Parameters")
 uploaded_file = st.sidebar.file_uploader("Upload your Excel data file", type=["xlsx"])
 
@@ -167,34 +190,44 @@ if uploaded_file:
     df_full = load_data(uploaded_file)
     if df_full is not None and not df_full.empty:
         
+        st.sidebar.subheader("📅 Backtest Period")
         start_date = st.sidebar.date_input("Start Date", df_full.index.min(), min_value=df_full.index.min(), max_value=df_full.index.max())
         end_date = st.sidebar.date_input("End Date", df_full.index.max(), min_value=df_full.index.min(), max_value=df_full.index.max())
         df = df_full.loc[start_date:end_date]
         
+        st.sidebar.subheader("🔬 Core Strategy")
         all_columns = df.columns.tolist()
         benchmark_col = st.sidebar.selectbox("Select Benchmark", options=all_columns, index=len(all_columns)-1)
         available_sectors = [col for col in all_columns if col != benchmark_col]
         sectors_to_run = st.sidebar.multiselect("Select Sectors", options=available_sectors, default=available_sectors)
         top_n = st.sidebar.slider("Sectors to Invest In (N)", 1, len(sectors_to_run) if sectors_to_run else 1, min(2, len(sectors_to_run)) if sectors_to_run else 1)
 
-        st.sidebar.subheader("⚖️ Indicator Weights")
-        weights = {}
+        ranking_method = st.sidebar.radio("Ranking Method", ["Absolute Momentum", "Relative Strength vs. Benchmark"], help="Relative strength ranks sectors based on their score minus the benchmark's score.")
+        use_trend_filter = st.sidebar.toggle(f"Enable Market Trend Filter ({TREND_FILTER_LOOKBACK}-day SMA)", value=True, help=f"If the benchmark is below its {TREND_FILTER_LOOKBACK}-day SMA, the portfolio moves to cash.")
+
+        st.sidebar.subheader("⚖️ Indicator Weights (0-100)")
+        weights_pct = {}
         c1, c2 = st.sidebar.columns(2)
-        weights['mom1m'] = c1.slider("1M Mom", 0.0, 1.0, 0.2, 0.05)
-        weights['mom3m'] = c2.slider("3M Mom", 0.0, 1.0, 0.2, 0.05)
-        weights['mom6m'] = c1.slider("6M Mom", 0.0, 1.0, 0.2, 0.05)
-        weights['sma'] = c2.slider("SMA Pos", 0.0, 1.0, 0.1, 0.05)
-        weights['rsi'] = c1.slider("RSI", 0.0, 1.0, 0.1, 0.05)
-        weights['macd_hist'] = c2.slider("MACD Hist", 0.0, 1.0, 0.1, 0.05)
-        weights['inv_vol'] = st.sidebar.slider("Inverse Volatility", 0.0, 1.0, 0.1, 0.05, help="Higher weight prefers less volatile sectors.")
+        weights_pct['mom1m'] = c1.slider("1M Mom", 0, 100, 20, 5)
+        weights_pct['mom3m'] = c2.slider("3M Mom", 0, 100, 20, 5)
+        weights_pct['mom6m'] = c1.slider("6M Mom", 0, 100, 20, 5)
+        weights_pct['sma'] = c2.slider("SMA Pos", 0, 100, 10, 5)
+        weights_pct['rsi'] = c1.slider("RSI", 0, 100, 10, 5)
+        weights_pct['macd_hist'] = c2.slider("MACD Hist", 0, 100, 10, 5)
+        weights_pct['inv_vol'] = st.sidebar.slider("Inverse Volatility", 0, 100, 10, 5)
+
+        raw_total = sum(weights_pct.values())
+        st.sidebar.metric("Weights Total", f"{raw_total} / 100")
+        st.sidebar.caption("Note: Weights are automatically normalized to sum to 1 for the calculation.")
+
+        # Convert percentage weights to decimals for calculation
+        weights = {k: v / 100.0 for k, v in weights_pct.items()}
         total_weight = sum(weights.values())
         if total_weight > 0: weights = {k: v / total_weight for k, v in weights.items()}
         
         with st.sidebar.expander("🔧 Advanced: Edit Lookback Periods"):
             lookbacks = {}
-            lookbacks['mom1'] = st.number_input("1M Momentum Days", 1, 252, 21)
-            lookbacks['mom3'] = st.number_input("3M Momentum Days", 1, 252, 63)
-            lookbacks['mom6'] = st.number_input("6M Momentum Days", 1, 504, 126)
+            lookbacks['mom1'], lookbacks['mom3'], lookbacks['mom6'] = 21, 63, 126
             lookbacks['sma'] = st.number_input("SMA Length", 1, 200, 30)
             lookbacks['rsi'] = st.number_input("RSI Length", 1, 200, 14)
             lookbacks['volatility'] = st.number_input("Volatility Window", 1, 200, 21)
@@ -204,8 +237,9 @@ if uploaded_file:
                 st.warning("Please select at least one sector.")
             else:
                 with st.spinner("Calculating..."):
-                    indicators_df = calculate_indicators(df, sectors_to_run, lookbacks)
-                    results = run_backtest(df, indicators_df, sectors_to_run, benchmark_col, weights, top_n)
+                    assets_to_calc = sectors_to_run + [benchmark_col]
+                    indicators_df = calculate_indicators(df, assets_to_calc, lookbacks)
+                    results = run_backtest(df, indicators_df, sectors_to_run, benchmark_col, weights, top_n, use_trend_filter, ranking_method)
                 
                 if results:
                     st.success("✅ Backtest Complete!")
