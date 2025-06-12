@@ -1,0 +1,11 @@
+streamlit
+pandas==2.2.2
+requests
+python-dateutil
+matplotlib
+seaborn
+plotly
+pandas-ta==0.3.14b0
+openpyxl
+setuptools
+numpy==1.26.4
