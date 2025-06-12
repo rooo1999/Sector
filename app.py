@@ -1,56 +1,74 @@
-# Final, clean code.
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pandas_ta
+import pandas_ta as ta  # Use the alias 'ta' so we can call ta.sma(), ta.rsi() etc.
 import plotly.graph_objects as go
 import openpyxl 
 
+# --- Page Configuration ---
 st.set_page_config(page_title="Momentum Sector Trading Strategy", layout="wide", initial_sidebar_state="expanded")
+
+#======================================================================
+# --- CORE BACKTESTING & DATA PROCESSING FUNCTIONS ---
+#======================================================================
 
 def load_data(uploaded_file):
     try:
         df = pd.read_excel(uploaded_file, engine='openpyxl')
         date_col = next((col for col in df.columns if 'date' in col.lower()), None)
-        if date_col is None:
-            st.error("Error: 'Date' column not found.")
-            return None
         df[date_col] = pd.to_datetime(df[date_col])
         df = df.set_index(date_col)
         for col in df.columns:
             if col.lower() != 'date':
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         df = df.dropna()
-        df = pd.DataFrame(df.values, index=df.index, columns=df.columns) # The "laundering" fix
+        # The laundering fix, which we will keep just in case.
+        df = pd.DataFrame(df.values, index=df.index, columns=df.columns)
         return df
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return None
 
 def calculate_indicators(df, sectors):
-    # ... (Your original, working calculate_indicators function) ...
+    """
+    Calculates all technical indicators using DIRECT FUNCTION CALLS
+    to bypass the broken .ta accessor.
+    """
     indicators_df = pd.DataFrame(index=df.index)
     volatility_window = 21
+
     for sector in sectors:
-        indicators_df[f'{sector}_mom1m'] = df[sector].pct_change(periods=21) 
-        indicators_df[f'{sector}_mom3m'] = df[sector].pct_change(periods=63)
-        indicators_df[f'{sector}_mom6m'] = df[sector].pct_change(periods=126)
-        sma_val = df[sector].ta.sma(length=30)
-        indicators_df[f'{sector}_sma_norm'] = (df[sector] - sma_val) / sma_val
-        indicators_df[f'{sector}_rsi'] = df[sector].ta.rsi(length=14)
-        macd = df[sector].ta.macd(fast=12, slow=26, signal=9)
+        # Isolate the series for clarity
+        sector_series = df[sector]
+        
+        # Standard pandas functions are fine
+        indicators_df[f'{sector}_mom1m'] = sector_series.pct_change(periods=21) 
+        indicators_df[f'{sector}_mom3m'] = sector_series.pct_change(periods=63)
+        indicators_df[f'{sector}_mom6m'] = sector_series.pct_change(periods=126)
+        
+        # --- MODIFIED SECTION ---
+        # Call pandas_ta functions directly: ta.indicator(series, ...kwargs)
+        sma_val = ta.sma(sector_series, length=30)
+        indicators_df[f'{sector}_rsi'] = ta.rsi(sector_series, length=14)
+        macd = ta.macd(sector_series, fast=12, slow=26, signal=9)
+        # --- END MODIFIED SECTION ---
+
+        indicators_df[f'{sector}_sma_norm'] = (sector_series - sma_val) / sma_val
+        
         if macd is not None and not macd.empty:
             indicators_df[f'{sector}_macd_hist'] = macd['MACDh_12_26_9']
         else:
             indicators_df[f'{sector}_macd_hist'] = 0
-        daily_returns = df[sector].pct_change()
+            
+        daily_returns = sector_series.pct_change()
         volatility = daily_returns.rolling(window=volatility_window).std()
         indicators_df[f'{sector}_inv_vol'] = 1 / volatility
         indicators_df[f'{sector}_inv_vol'].replace([np.inf, -np.inf], 0, inplace=True)
+
     return indicators_df.dropna()
 
 def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n=2):
-    # ... (Your original, working run_backtest function) ...
+    # This function remains unchanged
     rebalancing_dates = price_df.resample('MS').first().index
     rebalancing_dates = rebalancing_dates[rebalancing_dates >= indicators_df.index[0]]
     trades, portfolio_values = [], []
@@ -103,7 +121,11 @@ def run_backtest(price_df, indicators_df, sectors, benchmark_col, weights, top_n
     trades_df = pd.DataFrame(trades).fillna('-')
     return { "portfolio_df": portfolio_df, "benchmark_series": benchmark_norm, "trades_df": trades_df, "total_return": total_return, "cagr": cagr, "sharpe_ratio": sharpe_ratio, "latest_scores": latest_scores.sort_values(ascending=False) }
 
-# ... (Your original, working UI section) ...
+#======================================================================
+# --- STREAMLIT UI APPLICATION ---
+#======================================================================
+# This section remains unchanged
+
 st.title("Momentum-Based Sector Rotation Strategy")
 st.sidebar.header("⚙️ Strategy Parameters")
 uploaded_file = st.sidebar.file_uploader("Upload your Excel data file", type=["xlsx"])
@@ -155,3 +177,4 @@ if uploaded_file:
                     st.error("Backtest could not be completed.")
 else:
     st.info("👋 Welcome! Please upload an Excel data file to begin.")
+    
